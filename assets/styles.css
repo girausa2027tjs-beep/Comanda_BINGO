@@ -244,6 +244,9 @@ img { max-width: 100%; }
 .toast.ok { background: var(--verde); }
 .toast.mal { background: var(--rojo-osc); }
 .cargando { position: fixed; inset: 0; z-index: 80; background: rgba(255, 246, 230, .55); display: grid; place-items: center; }
+.cargando-caja { display: flex; flex-direction: column; align-items: center; gap: .6rem; }
+.cargando-caja p { margin: 0; font-weight: 900; color: var(--navy); background: #fff; padding: .3rem .8rem; border-radius: 999px; }
+.cargando-caja p:empty { display: none; }
 .spinner { width: 54px; height: 54px; border-radius: 50%; border: 6px solid var(--azul-claro); border-top-color: var(--rojo); animation: giro .8s linear infinite; }
 @keyframes giro { to { transform: rotate(360deg); } }
 

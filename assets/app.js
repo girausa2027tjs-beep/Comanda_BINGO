@@ -30,6 +30,11 @@
     if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
     return 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
   }
+  // Mismo reqId mientras la misma acción sobre el mismo pedido no se confirme.
+  var pendientes = {};
+  function reqIdPara(clave) { return pendientes[clave] || (pendientes[clave] = uuid()); }
+  function confirmado(clave) { delete pendientes[clave]; }
+
   function guardarSesion(v) { try { v ? sessionStorage.setItem('comandas_ses', JSON.stringify(v)) : sessionStorage.removeItem('comandas_ses'); } catch (e) {} }
   function leerSesion() { try { return JSON.parse(sessionStorage.getItem('comandas_ses') || 'null'); } catch (e) { return null; } }
 
@@ -41,27 +46,63 @@
     clearTimeout(toastT);
     toastT = setTimeout(function () { t.className = 'toast'; }, tipo === 'mal' ? 5200 : 3200);
   }
-  function cargando(on) { $('#cargando').hidden = !on; }
+  function cargando(on, texto) {
+    $('#cargando').hidden = !on;
+    $('#cargandoTxt').textContent = on ? (texto || '') : '';
+  }
 
   /* ================= API ================= */
 
-  function api(action, datos, opts) {
-    if (!CFG.API_URL) return Promise.reject(new Error('Falta configurar API_URL en assets/config.js'));
-    var body = Object.assign({ action: action, token: S.token }, datos || {});
-    if (!(opts && opts.silencioso)) cargando(true);
+  var ESCRITURAS = { crear: 1, editar: 1, estado: 1 };
+
+  // Un intento de red. Marca como "transitorio" todo error en que la respuesta
+  // se perdió (404/5xx de la redirección de Google, sin red, tiempo agotado,
+  // respuesta no JSON): en esos casos el servidor pudo haber guardado igual.
+  function intento(body) {
+    var ctrl = window.AbortController ? new AbortController() : null;
+    var t = ctrl ? setTimeout(function () { ctrl.abort(); }, 45000) : null;
     return fetch(CFG.API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(body),
-      redirect: 'follow'
+      redirect: 'follow',
+      signal: ctrl ? ctrl.signal : undefined
     }).then(function (r) {
-      if (!r.ok) throw new Error('El servidor respondió ' + r.status + '.');
-      return r.json();
+      if (!r.ok) { var e = new Error('El servidor respondió ' + r.status + '.'); e.transitorio = true; throw e; }
+      return r.text();
+    }).then(function (txt) {
+      try { return JSON.parse(txt); } catch (e) { var x = new Error('Respuesta incompleta del servidor.'); x.transitorio = true; throw x; }
     }).catch(function (err) {
-      if (err instanceof SyntaxError) throw new Error('Respuesta inválida del servidor.');
-      if (err && /fetch|network|Failed/i.test(err.message)) throw new Error('Sin conexión. Revisa internet e intenta de nuevo.');
-      throw err;
-    }).then(function (j) {
+      if (err && err.transitorio) throw err;
+      var e = new Error(err && err.name === 'AbortError' ? 'El servidor tardó demasiado.' : 'Sin conexión. Revisa internet.');
+      e.transitorio = true;
+      throw e;
+    }).finally(function () { if (t) clearTimeout(t); });
+  }
+
+  function api(action, datos, opts) {
+    if (!CFG.API_URL) return Promise.reject(new Error('Falta configurar API_URL en assets/config.js'));
+    var body = Object.assign({ action: action, token: S.token }, datos || {});
+    var silencioso = opts && opts.silencioso;
+    if (!silencioso) cargando(true);
+    // Escrituras: hasta 4 intentos con el MISMO reqId. El servidor reconoce el
+    // reqId y no vuelve a escribir, así reintentar nunca duplica nada.
+    // Lecturas: 2 intentos.
+    var max = ESCRITURAS[action] ? 4 : 2, n = 0;
+    function correr() {
+      n++;
+      return intento(body).catch(function (err) {
+        if (!err.transitorio || n >= max) {
+          if (err.transitorio && ESCRITURAS[action]) {
+            err.message += ' No se pudo confirmar. Revisa la lista antes de repetir: si el pedido aparece, ya quedó guardado.';
+          }
+          throw err;
+        }
+        if (!silencioso) cargando(true, 'Confirmando con el servidor…');
+        return new Promise(function (res) { setTimeout(res, 1200 * n); }).then(correr);
+      });
+    }
+    return correr().then(function (j) {
       if (!j || !j.ok) {
         var e = new Error((j && j.error) || 'Error desconocido.');
         e.codigo = j && j.codigo;
@@ -319,18 +360,20 @@
     var items = Object.keys(S.carrito).map(function (id) { return { id: Number(id), cantidad: S.carrito[id] }; });
     var datos = { mesa: $('#inpMesa').value.trim(), cliente: $('#inpCliente').value.trim(), tipoVenta: S.tipoVenta, items: items };
     btn.disabled = true; S.ocupado = true;
-    var p;
+    var p, clave = null;
     if (S.edit) {
-      p = api('editar', Object.assign(datos, { numero: S.edit.numero, version: S.edit.version }));
+      clave = 'editar:' + S.edit.numero + ':' + S.edit.version + ':' + JSON.stringify([datos.mesa, datos.cliente, datos.tipoVenta, items]);
+      p = api('editar', Object.assign(datos, { numero: S.edit.numero, version: S.edit.version, reqId: reqIdPara(clave) }));
     } else {
       if (!S.reqId) S.reqId = uuid();          // se conserva si hay que reintentar
       p = api('crear', Object.assign(datos, { reqId: S.reqId }));
     }
     p.then(function (r) {
+      if (clave) confirmado(clave);
       toast(S.edit ? 'Pedido #' + r.numero + ' actualizado ✔' : 'Pedido #' + r.numero + ' creado ✔', 'ok');
       limpiarVenta();
       cerrarModal();
-      cargarMis(true);
+      if (r.pedidos) { S.mis = r.pedidos; renderMis(); } else cargarMis(true);
     }).catch(function (e) {
       toast(e.message, 'mal');
       if (e.codigo === 'VERSION') { limpiarVenta(); cerrarModal(); mostrarTab('mis'); }
@@ -388,7 +431,7 @@
     if (modo === 'vendedor') {
       if (p.estado === 'Creado') acc += '<button class="btn btn-azul btn-chico" data-acc="editar">✏️ Editar</button>';
       if (p.estado === 'En preparación') acc += '<button class="btn btn-verde btn-chico" data-acc="entregar">✔ Marcar entregado</button>';
-      if (p.estado !== 'Eliminado') acc += '<button class="btn btn-peligro btn-chico" data-acc="eliminar">Eliminar</button>';
+      if (p.estado === 'Creado' || p.estado === 'En preparación') acc += '<button class="btn btn-peligro btn-chico" data-acc="eliminar">Eliminar</button>';
     } else {
       if (p.estado === 'Creado') acc += '<button class="btn btn-oro btn-chico" data-acc="preparar">🍳 A preparación + imprimir</button>';
       acc += '<button class="btn btn-borde btn-chico" data-acc="imprimir">🖨️ ' + (p.historial.some(function (h) { return h.estado === 'En preparación'; }) ? 'Reimprimir' : 'Imprimir') + '</button>';
@@ -436,12 +479,23 @@
   function cambiarEstado(p, nuevo, pregunta) {
     if (pregunta && !confirm(pregunta)) return Promise.resolve(null);
     S.ocupado = true;
-    return api('estado', { numero: p.numero, version: p.version, nuevo: nuevo })
-      .then(function (r) { toast('Pedido #' + p.numero + ': ' + r.estado + ' (' + r.hora.slice(0, 5) + ')', 'ok'); return r; })
+    var clave = 'estado:' + p.numero + ':' + p.version + ':' + nuevo;
+    var lista = null;
+    return api('estado', { numero: p.numero, version: p.version, nuevo: nuevo, reqId: reqIdPara(clave) })
+      .then(function (r) {
+        confirmado(clave);
+        lista = r.pedidos || null;
+        toast('Pedido #' + p.numero + ': ' + r.estado + ' (' + r.hora.slice(0, 5) + ')', 'ok');
+        return r;
+      })
       .catch(function (e) { toast(e.message, 'mal'); return null; })
       .finally(function () {
         S.ocupado = false;
-        if (S.usuario.perfil === 'admin') return cargarTodos(true);
+        if (S.usuario.perfil === 'admin') {
+          if (lista) { S.todos = lista; renderAdmin(); return; }
+          return cargarTodos(true);
+        }
+        if (lista) { S.mis = lista; renderMis(); return; }
         return cargarMis(true);
       });
   }
@@ -564,10 +618,14 @@
       var g = $('#btnGuardarAdm');
       if (g) g.onclick = function () {
         g.disabled = true; S.ocupado = true;
-        api('editar', { numero: p.numero, version: p.version, items: lineas.map(function (l) { return { id: l.id, cantidad: l.cantidad }; }) })
+        var its = lineas.map(function (l) { return { id: l.id, cantidad: l.cantidad }; });
+        var clave = 'editarAdm:' + p.numero + ':' + p.version + ':' + JSON.stringify(its);
+        api('editar', { numero: p.numero, version: p.version, items: its, reqId: reqIdPara(clave) })
           .then(function (r) {
+            confirmado(clave);
             toast('Pedido #' + p.numero + ' actualizado ✔', 'ok');
-            return cargarTodos(true).then(function () {
+            var listo = r.pedidos ? Promise.resolve((S.todos = r.pedidos, renderAdmin())) : cargarTodos(true);
+            return listo.then(function () {
               var nuevo = S.todos.filter(function (x) { return x.numero === p.numero; })[0];
               if (nuevo) abrirDetalleAdmin(nuevo); else cerrarModal();
             });
