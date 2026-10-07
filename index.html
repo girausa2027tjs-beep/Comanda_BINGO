@@ -6,6 +6,9 @@
   <title>Comandas · Gira USA Monkeys</title>
   <meta name="theme-color" content="#0f285d">
   <link rel="icon" href="assets/logo.png">
+  <!-- Conexión anticipada con Google Apps Script (ahorra tiempo en la primera llamada) -->
+  <link rel="preconnect" href="https://script.google.com" crossorigin>
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@500;700;800;900&display=swap" rel="stylesheet">
@@ -81,20 +84,26 @@
             <input id="inpCliente" maxlength="60" required placeholder="Ej: Carolina">
           </label>
         </div>
-        <div class="buscador">
+        <div class="buscador barra-acciones">
           <input id="buscaProd" type="search" placeholder="Buscar producto…" aria-label="Buscar producto">
+          <button class="btn btn-borde btn-chico btn-actualizar" type="button" data-actualizar="productos" title="Volver a leer los productos de la planilla">↻ <span class="txt-largo">Actualizar productos</span><span class="txt-corto">Actualizar</span></button>
         </div>
         <div id="gridProductos" class="grid-productos" aria-live="polite"></div>
       </section>
 
       <section id="panelMis" class="panel" hidden>
-        <div class="filtros" id="filtrosMis">
-          <button class="chip activo" data-f="activos">En curso</button>
-          <button class="chip" data-f="todos">Todos</button>
-          <button class="chip" data-f="Entregado">Entregados</button>
-          <button class="chip" data-f="Eliminado">Eliminados</button>
+        <div class="barra-acciones barra-derecha">
+          <span class="actualizado-txt" id="lblActMis"></span>
+          <button class="btn btn-borde btn-chico btn-actualizar" type="button" data-actualizar="mis" title="Volver a leer tus pedidos de la planilla">↻ <span>Actualizar pedidos</span></button>
         </div>
-        <div id="listaMis" class="lista-pedidos"></div>
+        <div class="filtros" id="filtrosMis">
+          <button class="chip activo" data-f="todos">Todos <b class="n"></b></button>
+          <button class="chip" data-f="activos">En curso <b class="n"></b></button>
+          <button class="chip" data-f="Entregado">Entregados <b class="n"></b></button>
+          <button class="chip" data-f="Eliminado">Eliminados <b class="n"></b></button>
+        </div>
+        <div class="aviso-lista" id="avisoMis" hidden></div>
+        <div id="listaMis" class="lista-pedidos"><div class="vacio">Cargando pedidos…</div></div>
       </section>
 
       <div class="carrito" id="barraCarrito" hidden>
@@ -113,18 +122,21 @@
         <div class="admin-controles">
           <input id="buscaAdmin" type="search" placeholder="Buscar N°, mesa, cliente o vendedor…" aria-label="Buscar pedido">
           <button class="btn btn-borde btn-chico" id="btnOrden" title="Cambiar orden">↑ Más antiguo primero</button>
+          <button class="btn btn-navy btn-chico btn-actualizar" type="button" data-actualizar="todos" title="Volver a leer todos los pedidos de la planilla">↻ <span>Actualizar pedidos</span></button>
+          <button class="btn btn-borde btn-chico btn-actualizar" type="button" data-actualizar="productos" title="Volver a leer los productos de la planilla">↻ <span>Actualizar productos</span></button>
         </div>
       </div>
       <div class="filtros" id="filtrosAdmin">
-        <button class="chip activo" data-f="activos">Pendientes</button>
-        <button class="chip" data-f="Creado">Creados</button>
-        <button class="chip" data-f="En preparación">En preparación</button>
-        <button class="chip" data-f="Entregado">Entregados</button>
-        <button class="chip" data-f="Eliminado">Eliminados</button>
-        <button class="chip" data-f="todos">Todos</button>
+        <button class="chip activo" data-f="todos">Todos <b class="n"></b></button>
+        <button class="chip" data-f="activos">Pendientes <b class="n"></b></button>
+        <button class="chip" data-f="Creado">Creados <b class="n"></b></button>
+        <button class="chip" data-f="En preparación">En preparación <b class="n"></b></button>
+        <button class="chip" data-f="Entregado">Entregados <b class="n"></b></button>
+        <button class="chip" data-f="Eliminado">Eliminados <b class="n"></b></button>
       </div>
+      <div class="aviso-lista" id="avisoAdmin" hidden></div>
       <div class="resumen-admin" id="resumenAdmin"></div>
-      <div id="listaAdmin" class="lista-pedidos lista-admin"></div>
+      <div id="listaAdmin" class="lista-pedidos lista-admin"><div class="vacio">Cargando pedidos…</div></div>
       <p class="actualizado" id="lblActualizado"></p>
     </main>
   </div>
