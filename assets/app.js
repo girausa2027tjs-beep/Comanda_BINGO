@@ -13,7 +13,9 @@
     edit: null,            // { numero, version, items } cuando se edita un pedido
     reqId: null,           // id de envío (anti-duplicado) del pedido en curso
     mis: [], todos: [],
-    filtroMis: 'activos', filtroAdmin: 'activos', ordenAsc: true, buscaAdmin: '',
+    filtroMis: 'todos', filtroAdmin: 'todos',
+    enviando: [],          // pedidos nuevos guardándose en segundo plano
+    seq: { mis: 0, todos: 0 }, aplicado: { mis: 0, todos: 0 }, cargado: { mis: false, todos: false }, ordenAsc: true, buscaAdmin: '',
     timer: null, ocupado: false
   };
 
@@ -109,6 +111,7 @@
         if (e.codigo === 'SESION') { salir(e.message); }
         throw e;
       }
+      if (j.ms != null && window.console) console.debug('[comandas] ' + action + ': ' + j.ms + ' ms en el servidor');
       return j;
     }).finally(function () { if (!(opts && opts.silencioso)) cargando(false); });
   }
@@ -172,11 +175,15 @@
     if (S.token && !msg) api('logout', {}, { silencioso: true }).catch(function () {});
     clearInterval(S.timer);
     S.token = null; S.usuario = null; S.carrito = {}; S.edit = null; S.reqId = null;
+    S.mis = []; S.todos = []; S.cargado = { mis: false, todos: false }; S.enviando = [];
+    ['#listaMis', '#listaAdmin'].forEach(function (s) { $(s).innerHTML = '<div class="vacio">Cargando pedidos…</div>'; });
+    aviso('mis', null); aviso('todos', null);
     guardarSesion(null);
     cerrarModal();
     iniciarLogin(msg);
   }
   $('#btnSalir').addEventListener('click', function () {
+    if (S.enviando.length && !confirm('Hay pedidos guardándose o sin guardar. Si sales ahora podrían perderse. ¿Salir igual?')) return;
     if (Object.keys(S.carrito).length && !confirm('Tienes un pedido sin enviar. ¿Salir igual?')) return;
     salir();
   });
@@ -191,19 +198,17 @@
     $('#vistaAdmin').hidden = !admin;
     $('#vistaVendedor').hidden = admin;
     $('#btnImpresora').hidden = !admin;
-    api('productos', {}, { silencioso: true }).then(function (r) {
-      S.productos = r.productos;
-      S.prodMap = {};
-      r.productos.forEach(function (p) { S.prodMap[p.id] = p; });
-      if (!admin) renderProductos();
-    }).catch(function (e) { toast(e.message, 'mal'); });
+    cargarProductos(false).catch(function (e) { toast(e.message, 'mal'); });
     if (admin) cargarTodos(); else { mostrarTab('venta'); cargarMis(true); }
     clearInterval(S.timer);
     S.timer = setInterval(refrescar, Math.max(5, CFG.REFRESCO_SEGUNDOS || 15) * 1000);
   }
 
   function refrescar() {
-    if (document.hidden || !S.token || S.ocupado || !$('#modal').hidden) return;
+    if (document.hidden || !S.token) return;
+    // Pedidos que quedaron "Sin guardar" por la red: se reintentan solos (nunca duplican).
+    S.enviando.forEach(function (env) { if (env.estado === 'error' && env.transitorio) enviarEnFondo(env); });
+    if (S.ocupado || !$('#modal').hidden) return;
     if (S.usuario.perfil === 'admin') cargarTodos(true); else cargarMis(true);
   }
   document.addEventListener('visibilitychange', function () { if (!document.hidden) refrescar(); });
@@ -359,7 +364,9 @@
   function enviarPedido(btn) {
     var items = Object.keys(S.carrito).map(function (id) { return { id: Number(id), cantidad: S.carrito[id] }; });
     var datos = { mesa: $('#inpMesa').value.trim(), cliente: $('#inpCliente').value.trim(), tipoVenta: S.tipoVenta, items: items };
+    if (!S.edit) return crearEnFondo(datos);
     btn.disabled = true; S.ocupado = true;
+    var n = turno('mis');
     var p, clave = null;
     if (S.edit) {
       clave = 'editar:' + S.edit.numero + ':' + S.edit.version + ':' + JSON.stringify([datos.mesa, datos.cliente, datos.tipoVenta, items]);
@@ -373,12 +380,95 @@
       toast(S.edit ? 'Pedido #' + r.numero + ' actualizado ✔' : 'Pedido #' + r.numero + ' creado ✔', 'ok');
       limpiarVenta();
       cerrarModal();
-      if (r.pedidos) { S.mis = r.pedidos; renderMis(); } else cargarMis(true);
+      if (!aplicarLista('mis', r.pedidos, n)) cargarMis(true);
     }).catch(function (e) {
       toast(e.message, 'mal');
       if (e.codigo === 'VERSION') { limpiarVenta(); cerrarModal(); mostrarTab('mis'); }
     }).finally(function () { btn.disabled = false; S.ocupado = false; });
   }
+
+  /*
+   * Pedido nuevo en segundo plano: el formulario queda libre al instante para la
+   * siguiente venta y el pedido aparece arriba en "Mis pedidos" como "Guardando…".
+   * Usa el mismo reqId en todos los reintentos, así nunca se duplica.
+   */
+  function crearEnFondo(datos) {
+    var env = {
+      reqId: S.reqId || uuid(), datos: datos, total: totalCarrito(), hora: hhmm(),
+      lineas: datos.items.map(function (i) { return { nombre: nombreDe(i.id), cantidad: i.cantidad, subtotal: precioDe(i.id) * i.cantidad }; })
+    };
+    S.enviando.unshift(env);
+    limpiarVenta();
+    cerrarModal();
+    toast('Enviando pedido de mesa ' + datos.mesa + '… ya puedes tomar el siguiente.', '');
+    enviarEnFondo(env);
+  }
+
+  function enviarEnFondo(env) {
+    env.estado = 'enviando'; env.error = '';
+    renderMis();
+    var n = turno('mis');
+    api('crear', Object.assign({}, env.datos, { reqId: env.reqId }), { silencioso: true })
+      .then(function (r) {
+        if (!S.token) return;
+        S.enviando = S.enviando.filter(function (x) { return x !== env; });
+        toast('Pedido #' + r.numero + ' (mesa ' + env.datos.mesa + ') creado ✔', 'ok');
+        if (!aplicarLista('mis', r.pedidos, n)) { renderMis(); cargarMis(true); }
+      })
+      .catch(function (e) {
+        if (e.codigo === 'SESION' || !S.token) return;
+        env.estado = 'error';
+        env.error = e.message;
+        env.transitorio = !!e.transitorio;
+        toast('El pedido de mesa ' + env.datos.mesa + ' no se pudo guardar. Revísalo en "Mis pedidos".', 'mal');
+        renderMis();
+      });
+  }
+
+  function tarjetaPendiente(env) {
+    var acc = env.estado === 'error'
+      ? '<div class="acciones"><button class="btn btn-azul btn-chico" data-env="reintentar" data-req="' + env.reqId + '">↻ Reintentar</button>' +
+        (env.transitorio ? '' : '<button class="btn btn-borde btn-chico" data-env="editar" data-req="' + env.reqId + '">✏️ Corregir</button>') +
+        '<button class="btn btn-peligro btn-chico" data-env="descartar" data-req="' + env.reqId + '">Descartar</button></div>'
+      : '';
+    return '<article class="pedido pendiente' + (env.estado === 'error' ? ' con-error' : '') + '">' +
+      '<div class="pedido-cabeza"><div class="pedido-num"><small>' + env.hora + '</small>' +
+      (env.estado === 'error' ? '⚠️ Sin guardar' : '<span class="mini-spin"></span> Guardando…') + '</div>' +
+      '<div class="pedido-mesa"><small>MESA</small><b>' + esc(env.datos.mesa) + '</b></div></div>' +
+      '<div class="pedido-cliente">' + esc(env.datos.cliente) + '</div>' +
+      '<ul class="pedido-items">' + env.lineas.map(function (i) {
+        return '<li><span><b>' + i.cantidad + '×</b> ' + esc(i.nombre) + '</span><span>' + plata(i.subtotal) + '</span></li>';
+      }).join('') + '</ul>' +
+      '<div class="pedido-total"><span class="tipo-venta">' + esc(env.datos.tipoVenta) + '</span><span>' + plata(env.total) + '</span></div>' +
+      (env.estado === 'error' ? '<p class="nota">' + esc(env.error) +
+        (env.transitorio ? ' Se volverá a intentar automáticamente.' : '') + '</p>' : '') + acc + '</article>';
+  }
+
+  $('#listaMis').addEventListener('click', function (ev) {
+    var b = ev.target.closest('[data-env]'); if (!b) return;
+    var env = S.enviando.filter(function (x) { return x.reqId === b.dataset.req; })[0];
+    if (!env) return;
+    if (b.dataset.env === 'reintentar') return enviarEnFondo(env);
+    if (b.dataset.env === 'descartar') {
+      if (!confirm('¿Descartar este pedido sin guardar? Si alcanzó a guardarse igual aparecerá en la lista.')) return;
+      S.enviando = S.enviando.filter(function (x) { return x !== env; });
+      renderMis(); cargarMis(true); return;
+    }
+    if (b.dataset.env === 'editar') {
+      // El servidor lo rechazó (no se guardó): se devuelve al formulario para corregirlo.
+      if (Object.keys(S.carrito).length && !confirm('Tienes una venta en el formulario. Se reemplazará. ¿Continuar?')) return;
+      S.enviando = S.enviando.filter(function (x) { return x !== env; });
+      limpiarVenta();
+      env.datos.items.forEach(function (i) { S.carrito[i.id] = i.cantidad; });
+      $('#inpMesa').value = env.datos.mesa; $('#inpCliente').value = env.datos.cliente;
+      S.tipoVenta = env.datos.tipoVenta;
+      mostrarTab('venta'); renderProductos(); actualizarCarrito();
+    }
+  });
+
+  window.addEventListener('beforeunload', function (ev) {
+    if (S.enviando.some(function (x) { return x.estado === 'enviando'; })) { ev.preventDefault(); ev.returnValue = ''; }
+  });
 
   function limpiarVenta() {
     S.carrito = {}; S.edit = null; S.reqId = null; S.tipoVenta = '';
@@ -391,11 +481,118 @@
 
   /* ================= VENDEDOR: mis pedidos ================= */
 
-  function cargarMis(silencioso) {
-    return api('misPedidos', {}, { silencioso: silencioso }).then(function (r) {
-      S.mis = r.pedidos;
-      renderMis();
-    }).catch(function (e) { if (!silencioso) toast(e.message, 'mal'); });
+  /*
+   * Listas de pedidos:
+   *  - cada pedido de lista toma un "turno"; una respuesta vieja que llega tarde
+   *    nunca reemplaza una más nueva;
+   *  - si la carga falla, se conserva la última lista buena y se muestra un aviso
+   *    con botón Reintentar (nunca queda en blanco sin explicación).
+   */
+  function turno(tipo) { return ++S.seq[tipo]; }
+  function aplicarLista(tipo, pedidos, n, hora) {
+    if (!Array.isArray(pedidos) || n < S.aplicado[tipo]) return false;
+    S.aplicado[tipo] = n;
+    S.cargado[tipo] = true;
+    if (tipo === 'mis') { S.mis = pedidos; renderMis(); } else { S.todos = pedidos; renderAdmin(); }
+    aviso(tipo, null);
+    if (tipo === 'todos') $('#lblActualizado').textContent = 'Actualizado a las ' + (hora || new Date().toLocaleTimeString('es-CL', { hour12: false })) + ' · se refresca solo cada ' + (CFG.REFRESCO_SEGUNDOS || 15) + ' s';
+    return true;
+  }
+  function aviso(tipo, msg) {
+    var el = $(tipo === 'mis' ? '#avisoMis' : '#avisoAdmin');
+    if (!msg) { el.hidden = true; el.innerHTML = ''; return; }
+    el.innerHTML = '<span>⚠️ ' + esc(msg) + '</span><button class="btn btn-peligro btn-chico" data-reintentar="' + tipo + '">Reintentar</button>';
+    el.hidden = false;
+    if (!S.cargado[tipo]) {
+      $(tipo === 'mis' ? '#listaMis' : '#listaAdmin').innerHTML = '<div class="vacio">No se pudieron cargar los pedidos.</div>';
+    }
+  }
+  document.addEventListener('click', function (ev) {
+    var b = ev.target.closest('[data-reintentar]');
+    if (b) { if (b.dataset.reintentar === 'mis') cargarMis(false); else cargarTodos(false); return; }
+    var v = ev.target.closest('[data-ver-todos]');
+    if (v) {
+      var cont = v.dataset.verTodos === 'mis' ? '#filtrosMis' : '#filtrosAdmin';
+      $(cont + ' .chip[data-f="todos"]').click();
+    }
+  });
+  function hhmm() { return new Date().toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit', hour12: false }); }
+
+  function cargarMis(silencioso, fresco) {
+    var n = turno('mis');
+    return api('misPedidos', fresco ? { fresco: true } : {}, { silencioso: silencioso }).then(function (r) {
+      aplicarLista('mis', r.pedidos, n, r.hora);
+      $('#lblActMis').textContent = 'Actualizado ' + (r.hora || '').slice(0, 5);
+      return true;
+    }).catch(function (e) {
+      if (e.codigo === 'SESION') return false;
+      aviso('mis', 'No se pudo actualizar la lista (' + hhmm() + '): ' + e.message + ' Se reintentará sola.');
+      return false;
+    });
+  }
+
+  /** Productos activos desde el servidor; fresco = releer la planilla. */
+  function cargarProductos(fresco) {
+    return api('productos', fresco ? { fresco: true } : {}, { silencioso: true }).then(function (r) {
+      var antes = S.prodMap;               // nombres previos, para avisar qué se quitó
+      S.productos = r.productos;
+      S.prodMap = {};
+      r.productos.forEach(function (p) { S.prodMap[p.id] = p; });
+      // Productos que ya no están disponibles salen del pedido en curso (no al editar uno existente).
+      var quitados = [];
+      if (!S.edit) Object.keys(S.carrito).forEach(function (id) {
+        if (!S.prodMap[id]) { quitados.push(antes[id] ? antes[id].nombre : 'Producto ' + id); delete S.carrito[id]; }
+      });
+      if (S.usuario && S.usuario.perfil !== 'admin') { renderProductos(); actualizarCarrito(); }
+      return { total: r.productos.length, quitados: quitados };
+    });
+  }
+
+  /*
+   * Botones "Actualizar pedidos" / "Actualizar productos" (ambos perfiles).
+   * Piden al servidor releer la planilla, sin usar la memoria rápida.
+   */
+  document.addEventListener('click', function (ev) {
+    var b = ev.target.closest('[data-actualizar]'); if (!b || b.classList.contains('girando')) return;
+    var que = b.dataset.actualizar;
+    b.classList.add('girando'); b.disabled = true;
+    b.innerHTML = '<span class="spin-ic">↻</span> ' + b.innerHTML.replace(/^↻\s*/, '');
+    var fin = function () {
+      b.classList.remove('girando'); b.disabled = false;
+      var sp = b.querySelector('.spin-ic'); if (sp) sp.outerHTML = '↻';
+    };
+    var p;
+    if (que === 'productos') {
+      p = cargarProductos(true).then(function (r) {
+        toast('Productos actualizados: ' + r.total + ' disponibles' +
+          (r.quitados.length ? '. Se quitó del pedido: ' + r.quitados.join(', ') + ' (ya no está disponible)' : ' ✔'),
+          r.quitados.length ? 'mal' : 'ok');
+      }, function (e) { toast('No se pudieron actualizar los productos: ' + e.message, 'mal'); });
+    } else {
+      // Pedidos "Sin guardar" por la red también se reintentan al actualizar.
+      S.enviando.forEach(function (env) { if (env.estado === 'error' && env.transitorio) enviarEnFondo(env); });
+      p = (que === 'todos' ? cargarTodos(true, true) : cargarMis(true, true)).then(function (ok) {
+        if (ok) toast('Pedidos actualizados (' + hhmm() + ') ✔', 'ok');
+      });
+    }
+    p.then(fin, fin);
+  });
+
+  // Cuenta por filtro en cada botón y mensaje de vista vacía que explica dónde están los pedidos.
+  function contarChips(cont, lista) {
+    $$(cont + ' .chip').forEach(function (c) {
+      var f = c.dataset.f, n = lista.filter(function (p) { return pasaFiltro(p, f); }).length;
+      var b = c.querySelector('.n'); if (b) b.textContent = '(' + n + ')';
+    });
+  }
+  function vacioHTML(tipo, total, filtro, buscando) {
+    if (!S.cargado[tipo]) return '<div class="vacio">Cargando pedidos…</div>';
+    if (!total) return '<div class="vacio">Aún no hay pedidos.</div>';
+    var nombre = ($((tipo === 'mis' ? '#filtrosMis' : '#filtrosAdmin') + ' .chip[data-f="' + filtro + '"]') || {}).textContent || '';
+    nombre = nombre.replace(/\s*\(\d+\)\s*$/, '').trim();
+    var txt = buscando ? 'Ningún pedido coincide con la búsqueda.' : 'No hay pedidos en «' + esc(nombre) + '».';
+    return '<div class="vacio">' + txt + '<br>Hay ' + total + ' pedido' + (total === 1 ? '' : 's') + ' en total.' +
+      (filtro !== 'todos' ? '<br><button class="btn btn-navy btn-chico" data-ver-todos="' + tipo + '">Ver todos</button>' : '') + '</div>';
   }
 
   $('#filtrosMis').addEventListener('click', function (ev) {
@@ -412,11 +609,13 @@
   }
 
   function renderMis() {
-    var activos = S.mis.filter(function (p) { return pasaFiltro(p, 'activos'); }).length;
+    var activos = S.mis.filter(function (p) { return pasaFiltro(p, 'activos'); }).length + S.enviando.length;
     $('#cntMis').textContent = activos;
+    contarChips('#filtrosMis', S.mis);
     var lista = S.mis.filter(function (p) { return pasaFiltro(p, S.filtroMis); });
-    $('#listaMis').innerHTML = lista.length ? lista.map(function (p) { return tarjetaPedido(p, 'vendedor'); }).join('')
-      : '<div class="vacio">No hay pedidos en esta vista.</div>';
+    var pend = S.enviando.map(tarjetaPendiente).join('');
+    $('#listaMis').innerHTML = pend + (lista.length ? lista.map(function (p) { return tarjetaPedido(p, 'vendedor'); }).join('')
+      : (pend ? '' : vacioHTML('mis', S.mis.length, S.filtroMis, false)));
   }
 
   function historialHTML(p) {
@@ -428,11 +627,13 @@
 
   function tarjetaPedido(p, modo) {
     var acc = '';
-    if (modo === 'vendedor') {
+    if (p.guardando) {
+      acc = '';
+    } else if (modo === 'vendedor') {
       if (p.estado === 'Creado') acc += '<button class="btn btn-azul btn-chico" data-acc="editar">✏️ Editar</button>';
       if (p.estado === 'En preparación') acc += '<button class="btn btn-verde btn-chico" data-acc="entregar">✔ Marcar entregado</button>';
       if (p.estado === 'Creado' || p.estado === 'En preparación') acc += '<button class="btn btn-peligro btn-chico" data-acc="eliminar">Eliminar</button>';
-    } else {
+    } else if (modo === 'admin') {
       if (p.estado === 'Creado') acc += '<button class="btn btn-oro btn-chico" data-acc="preparar">🍳 A preparación + imprimir</button>';
       acc += '<button class="btn btn-borde btn-chico" data-acc="imprimir">🖨️ ' + (p.historial.some(function (h) { return h.estado === 'En preparación'; }) ? 'Reimprimir' : 'Imprimir') + '</button>';
     }
@@ -446,6 +647,7 @@
         return '<li><span><b>' + i.cantidad + '×</b> ' + esc(i.nombre) + '</span><span>' + plata(i.subtotal) + '</span></li>';
       }).join('') + '</ul>' +
       '<div class="pedido-total"><span class="estado" data-e="' + esc(p.estado) + '">' + esc(p.estado) + '</span>' +
+      (p.guardando ? '<span class="guardando"><span class="mini-spin"></span> Guardando…</span>' : '') +
       '<span><span class="tipo-venta' + tipoCls + '">' + esc(p.tipoVenta) + '</span> ' + plata(p.total) + '</span></div>' +
       historialHTML(p) +
       (acc ? '<div class="acciones">' + acc + '</div>' : '') +
@@ -478,10 +680,24 @@
 
   function cambiarEstado(p, nuevo, pregunta) {
     if (pregunta && !confirm(pregunta)) return Promise.resolve(null);
-    S.ocupado = true;
     var clave = 'estado:' + p.numero + ':' + p.version + ':' + nuevo;
-    var lista = null;
-    return api('estado', { numero: p.numero, version: p.version, nuevo: nuevo, reqId: reqIdPara(clave) })
+    var lista = null, tipo = S.usuario.perfil === 'admin' ? 'todos' : 'mis', n = turno(tipo);
+    var optimista = tipo === 'mis';
+    if (optimista) {
+      // Se muestra el cambio al instante; si el servidor lo rechaza, se vuelve atrás.
+      S.aplicado.mis = n;              // descarta listas pedidas antes de este cambio
+      var nombre = { 2: 'En preparación', 3: 'Entregado', 4: 'Eliminado' }[nuevo];
+      S.mis = S.mis.map(function (x) {
+        return x.numero !== p.numero ? x : Object.assign({}, x, {
+          estado: nombre, guardando: true,
+          historial: x.historial.concat([{ estado: nombre, fecha: x.fecha, hora: '…' }])
+        });
+      });
+      renderMis();
+    } else {
+      S.ocupado = true;
+    }
+    return api('estado', { numero: p.numero, version: p.version, nuevo: nuevo, reqId: reqIdPara(clave) }, { silencioso: optimista })
       .then(function (r) {
         confirmado(clave);
         lista = r.pedidos || null;
@@ -491,23 +707,23 @@
       .catch(function (e) { toast(e.message, 'mal'); return null; })
       .finally(function () {
         S.ocupado = false;
-        if (S.usuario.perfil === 'admin') {
-          if (lista) { S.todos = lista; renderAdmin(); return; }
-          return cargarTodos(true);
-        }
-        if (lista) { S.mis = lista; renderMis(); return; }
-        return cargarMis(true);
+        if (lista && aplicarLista(tipo, lista, n)) return;
+        return tipo === 'todos' ? cargarTodos(true) : cargarMis(true);
       });
   }
 
   /* ================= ADMINISTRADOR ================= */
 
-  function cargarTodos(silencioso) {
-    return api('todosPedidos', {}, { silencioso: silencioso }).then(function (r) {
-      S.todos = r.pedidos;
-      renderAdmin();
-      $('#lblActualizado').textContent = 'Actualizado a las ' + r.hora + ' · se refresca solo cada ' + (CFG.REFRESCO_SEGUNDOS || 15) + ' s';
-    }).catch(function (e) { if (!silencioso) toast(e.message, 'mal'); });
+  function cargarTodos(silencioso, fresco) {
+    var n = turno('todos');
+    return api('todosPedidos', fresco ? { fresco: true } : {}, { silencioso: silencioso }).then(function (r) {
+      aplicarLista('todos', r.pedidos, n, r.hora);
+      return true;
+    }).catch(function (e) {
+      if (e.codigo === 'SESION') return false;
+      aviso('todos', 'No se pudo actualizar la lista (' + hhmm() + '): ' + e.message + ' Se reintentará sola.');
+      return false;
+    });
   }
 
   $('#filtrosAdmin').addEventListener('click', function (ev) {
@@ -540,8 +756,9 @@
       return norm(['#' + p.numero, p.numero, 'mesa ' + p.mesa, p.cliente, p.usuario].join(' ')).indexOf(q) >= 0;
     });
     lista.sort(function (a, b) { return S.ordenAsc ? a.numero - b.numero : b.numero - a.numero; });
+    contarChips('#filtrosAdmin', S.todos);
     $('#listaAdmin').innerHTML = lista.length ? lista.map(function (p) { return tarjetaPedido(p, 'admin'); }).join('')
-      : '<div class="vacio">No hay pedidos en esta vista.</div>';
+      : vacioHTML('todos', S.todos.length, S.filtroAdmin, !!q);
   }
   function kpi(t, v) { return '<div class="kpi"><span>' + t + '</span><b>' + v + '</b></div>'; }
 
@@ -620,11 +837,12 @@
         g.disabled = true; S.ocupado = true;
         var its = lineas.map(function (l) { return { id: l.id, cantidad: l.cantidad }; });
         var clave = 'editarAdm:' + p.numero + ':' + p.version + ':' + JSON.stringify(its);
+        var nT = turno('todos');
         api('editar', { numero: p.numero, version: p.version, items: its, reqId: reqIdPara(clave) })
           .then(function (r) {
             confirmado(clave);
             toast('Pedido #' + p.numero + ' actualizado ✔', 'ok');
-            var listo = r.pedidos ? Promise.resolve((S.todos = r.pedidos, renderAdmin())) : cargarTodos(true);
+            var listo = aplicarLista('todos', r.pedidos, nT) ? Promise.resolve() : cargarTodos(true);
             return listo.then(function () {
               var nuevo = S.todos.filter(function (x) { return x.numero === p.numero; })[0];
               if (nuevo) abrirDetalleAdmin(nuevo); else cerrarModal();

@@ -188,6 +188,24 @@ img { max-width: 100%; }
 .historial li.actual::before { color: var(--rojo); }
 .acciones { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .75rem; }
 .acciones .btn { flex: 1 1 auto; }
+.chip .n { font-weight: 900; opacity: .75; margin-left: .15rem; }
+.chip .n:empty { display: none; }
+.aviso-lista { display: flex; align-items: center; justify-content: space-between; gap: .6rem; flex-wrap: wrap; background: #fde2e3; color: var(--rojo-osc); border: 2px solid var(--rojo); border-radius: 12px; padding: .55rem .8rem; margin-bottom: .8rem; font-weight: 800; font-size: .92rem; }
+.pedido.pendiente { border: 2px dashed #b9c8f0; border-left: 7px solid var(--azul); background: #f6f9ff; }
+.pedido.pendiente.con-error { border-color: #f3b4b7; border-left-color: var(--rojo); background: #fff5f5; }
+.pedido.pendiente .pedido-num { font-size: 1.15rem; display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.pedido.pendiente .pedido-num small { flex-basis: 100%; }
+.mini-spin { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2.5px solid var(--azul-claro); border-top-color: var(--azul); animation: giro .8s linear infinite; vertical-align: -2px; }
+.guardando { font-size: .8rem; font-weight: 800; color: var(--azul); }
+.barra-acciones { display: flex; gap: .5rem; align-items: center; }
+.barra-acciones input { flex: 1; min-width: 0; }
+.barra-derecha { justify-content: flex-end; margin-bottom: .7rem; }
+.actualizado-txt { font-size: .8rem; color: var(--gris); font-weight: 700; margin-right: auto; }
+.btn-actualizar.girando { pointer-events: none; opacity: .7; }
+.btn-actualizar .spin-ic { display: inline-block; animation: giro .8s linear infinite; }
+.txt-corto { display: none; }
+@media (max-width: 560px) { .buscador .txt-largo { display: none; } .buscador .txt-corto { display: inline; } }
+.vacio .btn { margin-top: .7rem; }
 .vacio { text-align: center; color: var(--gris); font-weight: 800; padding: 2.5rem 1rem; background: rgba(255,255,255,.6); border-radius: var(--radio); border: 2px dashed var(--linea); }
 
 /* ---------- Admin ---------- */
